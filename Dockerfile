@@ -96,7 +96,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   - 字体 (noto emoji + 文泉驿)      : 图片渲染中文与 emoji
 #   - playwright chromium 依赖        : htmlrender 渲染服务
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
       ca-certificates \
+      gcc \
+      libffi-dev \
+      libssl-dev \
+      python3-dev \
       curl \
       ffmpeg \
       libavcodec-extra \
