@@ -51,10 +51,28 @@ RUN set -eux; \
            /sources/zhenxun_bot_plugins/.git \
            /sources/zhenxun-bot-resources/.git
 
+# 记录上游版本到镜像元数据
+RUN python - <<'PY'
+import pathlib, tomllib
+root = pathlib.Path("/sources/zhenxun_bot")
+try:
+    ver = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+except Exception:
+    ver = "unknown"
+pathlib.Path("/tmp/zhenxun_version").write_text(ver)
+print(f"zhenxun_bot version: {ver}")
+PY
+
 # ---------------------------------------------------------------------------
 # runtime: 运行环境
 # ---------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+
+LABEL org.opencontainers.image.title="Zhenxun Docker Framework" \
+      org.opencontainers.image.description="绪山真寻 Bot (zhenxun-org) 的 Linux Docker 运行框架 / 后端 Bot 框架" \
+      org.opencontainers.image.source="https://github.com/zhenxun-org/zhenxun.Docker.Framework" \
+      org.opencontainers.image.vendor="zhenxun-org" \
+      org.opencontainers.image.licenses="AGPL-3.0"
 
 ARG TARGETARCH
 ARG PYTHON_VERSION
@@ -81,6 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       ffmpeg \
+      libavcodec-extra \
       fontconfig \
       fonts-noto-color-emoji \
       fonts-wqy-zenhei \
@@ -148,6 +167,9 @@ RUN chmod +x /usr/local/bin/start.sh
 # 数据目录 (后续由 start.sh 按 ZHENXUN_UID/GID 修正属主)
 RUN mkdir -p data log resources \
  && chown -R zhenxun:zhenxun /app/zhenxun
+
+# 上游版本元数据
+COPY --from=prepare /tmp/zhenxun_version /app/VERSION
 
 VOLUME ["/app/zhenxun/data", "/app/zhenxun/resources", "/app/zhenxun/log", "/app/zhenxun/zhenxun/plugins"]
 

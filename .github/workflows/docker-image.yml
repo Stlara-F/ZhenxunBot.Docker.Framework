@@ -1,29 +1,49 @@
+# ============================================================================
+# Zhenxun Docker Framework — CICD 自动构建并上传 Docker Hub (多架构)
+#
+# 触发方式:
+#   - push tag v*         : 发布镜像 (vX.Y.Z + latest[稳定版])
+#   - 每日定时 (02:00 UTC) : nightly 镜像 (nightly-latest / nightly-日期-sha)
+#   - 手动 workflow_dispatch : 自定义 tag / 上游版本
+#
+# 所需 Secrets (仓库 Settings -> Secrets and variables -> Actions):
+#   DOCKER_HUB_USERNAME  Docker Hub 用户名
+#   DOCKER_HUB_PASSWORD  Docker Hub Access Token / 密码
+# 可选 Variables (仓库 Settings -> Secrets and variables -> Actions -> Variables):
+#   IMAGE           Docker Hub 仓库 (默认 zhenxun-org/zhenxun-docker-framework)
+#   GHCR_IMAGE      额外推送到 GHCR 的仓库 (默认 ghcr.io/zhenxun-org/zhenxun-docker-framework, 设为 none 则关闭)
+#   ZHENXUN_REF     zhenxun_bot 上游版本 (默认 main)
+#   PLUGINS_REF     插件库版本 (默认 main)
+#   RESOURCES_REF   主题资源版本 (默认 main)
+# ============================================================================
+
 name: docker-publish
 
-# 手动触发构建并发布多架构镜像 (linux/amd64 + linux/arm64)
 on:
+  push:
+    tags:
+      - "v*"
+  schedule:
+    # 每日 UTC 02:00 (= 北京时间 10:00) 构建 nightly
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
-      image:
-        description: "镜像仓库 (registry/namespace/repo)"
-        required: true
-        default: "ghcr.io/zhenxun-org/zhenxun-docker-framework"
       tag:
-        description: "镜像 tag"
+        description: "镜像 tag (留空默认 dev)"
         required: false
-        default: "latest"
+        default: ""
       zhenxun_ref:
-        description: "zhenxun_bot 版本 (tag 或分支)"
+        description: "zhenxun_bot 上游版本 (tag 或分支)"
         required: false
-        default: "main"
+        default: ""
       plugins_ref:
         description: "zhenxun_bot_plugins 版本"
         required: false
-        default: "main"
+        default: ""
       resources_ref:
         description: "zhenxun-bot-resources 版本"
         required: false
-        default: "main"
+        default: ""
       also_latest:
         description: "同时更新 :latest"
         type: boolean
@@ -31,100 +51,154 @@ on:
         default: false
 
 env:
-  IMAGE: ${{ github.event.inputs.image }}
-  TAG: ${{ github.event.inputs.tag || 'latest' }}
-  ZHENXUN_REF: ${{ github.event.inputs.zhenxun_ref || 'main' }}
-  PLUGINS_REF: ${{ github.event.inputs.plugins_ref || 'main' }}
-  RESOURCES_REF: ${{ github.event.inputs.resources_ref || 'main' }}
-  ALSO_LATEST: ${{ github.event.inputs.also_latest || 'false' }}
+  IMAGE: ${{ vars.IMAGE || 'zhenxun-org/zhenxun-docker-framework' }}
+  GHCR_IMAGE: ${{ vars.GHCR_IMAGE || 'ghcr.io/zhenxun-org/zhenxun-docker-framework' }}
+  ZHENXUN_REF: ${{ inputs.zhenxun_ref || vars.ZHENXUN_REF || 'main' }}
+  PLUGINS_REF: ${{ inputs.plugins_ref || vars.PLUGINS_REF || 'main' }}
+  RESOURCES_REF: ${{ inputs.resources_ref || vars.RESOURCES_REF || 'main' }}
 
 jobs:
-  build:
-    name: build (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-22.04
-          - platform: linux/arm64
-            runner: ubuntu-22.04-arm
+  # 计算标签 / 判断 nightly 是否需要构建
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.nightly-check.outputs.skip }}
+      tags: ${{ steps.tags.outputs.tags }}
+      has_ghcr: ${{ steps.tags.outputs.has_ghcr }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: actions/checkout@v7
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: Login to Docker Hub
-        if: startsWith(env.IMAGE, 'docker.io/')
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Nightly 变更检查 (24h 内无提交则跳过)
+        id: nightly-check
+        if: github.event_name == 'schedule'
+        run: |
+          commits=$(git log --since="24 hours ago" --oneline)
+          if [ -z "$commits" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::框架仓库 24h 内无提交, 跳过 nightly 构建"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Fetch zhenxun sources
+      - name: 计算镜像标签
+        id: tags
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.IMAGE }}"
+          GHCR_IMAGE="${{ env.GHCR_IMAGE }}"
+          TAGS=""
+          GHCR_TAGS=""
+          HAS_GHCR="false"
+
+          case "${{ github.event_name }}" in
+            push)
+              VERSION="${GITHUB_REF#refs/tags/}"
+              case "$VERSION" in
+                *beta*|*alpha*|*rc*|*pre*|*dev*) IS_PRERELEASE="true" ;;
+                *) IS_PRERELEASE="false" ;;
+              esac
+              TAGS="${IMAGE}:${VERSION}"
+              if [ "$IS_PRERELEASE" = "false" ] && [ "$VERSION" != "latest" ]; then
+                TAGS="${TAGS}\n${IMAGE}:latest"
+              fi
+              ;;
+            schedule)
+              SHA="$(git rev-parse --short=12 HEAD)"
+              DATE="$(date +%Y%m%d)"
+              TAGS="${IMAGE}:nightly-latest\n${IMAGE}:nightly-${DATE}-${SHA}"
+              ;;
+            workflow_dispatch)
+              VERSION="${{ inputs.tag || 'dev' }}"
+              TAGS="${IMAGE}:${VERSION}"
+              if [ "${{ inputs.also_latest || 'false' }}" = "true" ] && [ "$VERSION" != "latest" ]; then
+                TAGS="${TAGS}\n${IMAGE}:latest"
+              fi
+              ;;
+          esac
+
+          # GHCR 镜像 (同后缀), 设为 none 关闭
+          if [ -n "$GHCR_IMAGE" ] && [ "$GHCR_IMAGE" != "none" ]; then
+            HAS_GHCR="true"
+            while IFS= read -r t; do
+              [ -n "$t" ] && GHCR_TAGS="${GHCR_TAGS}\n${GHCR_IMAGE}:${t#*:}"
+            done < <(printf '%b' "$TAGS")
+          fi
+
+          # 合并并过滤空行
+          ALL_TAGS="$(printf '%b\n' "$TAGS" "$GHCR_TAGS" | sed '/^[[:space:]]*$/d')"
+
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$ALL_TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "has_ghcr=${HAS_GHCR}" >> "$GITHUB_OUTPUT"
+
+          echo "===== 镜像标签 ====="
+          printf '%s\n' "$ALL_TAGS"
+
+  docker:
+    needs: meta
+    if: needs.meta.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: 校验 Docker Hub Secrets
+        run: |
+          if [ -z "${{ secrets.DOCKER_HUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_HUB_PASSWORD }}" ]; then
+            echo "::error::缺少 DOCKER_HUB_USERNAME / DOCKER_HUB_PASSWORD secrets, 无法推送到 Docker Hub"
+            exit 1
+          fi
+
+      - name: 预取上游源码
         run: ./scripts/fetch-sources.sh
         env:
           ZHENXUN_REF: ${{ env.ZHENXUN_REF }}
           PLUGINS_REF: ${{ env.PLUGINS_REF }}
           RESOURCES_REF: ${{ env.RESOURCES_REF }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Set up QEMU (多架构仿真)
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: 登录 GHCR (镜像, 可选)
+        if: needs.meta.outputs.has_ghcr == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送多架构镜像 (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:${{ env.TAG }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          tags: ${{ needs.meta.outputs.tags }}
           build-args: |
             ZHENXUN_REF=${{ env.ZHENXUN_REF }}
             PLUGINS_REF=${{ env.PLUGINS_REF }}
             RESOURCES_REF=${{ env.RESOURCES_REF }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
 
-  merge:
-    name: merge manifest
-    needs: build
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Login to Docker Hub
-        if: startsWith(env.IMAGE, 'docker.io/')
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Merge multi-arch manifest
+      - name: 发布摘要
         run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${TAG}" \
-            "${IMAGE}:${TAG}-amd64" \
-            "${IMAGE}:${TAG}-arm64"
-          if [ "${ALSO_LATEST}" = "true" ] && [ "${TAG}" != "latest" ]; then
-            docker buildx imagetools create \
-              --tag "${IMAGE}:latest" \
-              "${IMAGE}:${TAG}-amd64" \
-              "${IMAGE}:${TAG}-arm64"
-          fi
-          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+          echo "### 镜像已发布 🚀" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "${{ needs.meta.outputs.tags }}" | sed 's/^/ - /' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "上游: zhenxun_bot@${{ env.ZHENXUN_REF }} | plugins@${{ env.PLUGINS_REF }} | resources@${{ env.RESOURCES_REF }}" >> "$GITHUB_STEP_SUMMARY"

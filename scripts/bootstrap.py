@@ -107,6 +107,9 @@ def render_env_dev() -> str:
         else:
             put(key, os.environ.get(key, default))
 
+    # Chromium 渲染参数: Docker 内必须禁用沙箱, 并规避 /dev/shm 过小问题
+    put("htmlrender_browser_args", os.environ.get("HTMLRENDER_BROWSER_ARGS", "--no-sandbox --disable-dev-shm-usage"))
+
     # 可选键
     for key in OPTIONAL_ENV_KEYS:
         if os.environ.get(key) is not None:

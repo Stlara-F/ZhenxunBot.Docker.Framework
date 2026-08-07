@@ -28,6 +28,9 @@ services:
     container_name: ${ZHENXUN_CONTAINER:-zhenxun}
     restart: unless-stopped
     init: true
+    shm_size: 1gb
+    security_opt:
+      - no-new-privileges:true
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       ZHENXUN_UID: ${ZHENXUN_UID:-1000}
@@ -59,6 +62,8 @@ services:
       # WebUI
       WEBUI_USERNAME: ${WEBUI_USERNAME:-admin}
       WEBUI_PASSWORD: ${WEBUI_PASSWORD:-}
+      # 渲染 (Chromium 沙箱/共享内存)
+      HTMLRENDER_BROWSER_ARGS: ${HTMLRENDER_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage}
       # 其它
       SYSTEM_PROXY: ${SYSTEM_PROXY:-}
       LOG_LEVEL: ${LOG_LEVEL:-}
