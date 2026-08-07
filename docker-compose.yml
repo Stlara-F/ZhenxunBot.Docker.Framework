@@ -1,0 +1,172 @@
+# ============================================================================
+# Zhenxun Docker Framework — 全栈编排
+#
+# 服务:
+#   zhenxun  : 绪山真寻 Bot (镜像内: bot + 官方插件 + UI 主题 + playwright)
+#   db       : PostgreSQL 15 (必选)
+#   redis    : Redis 7 (缓存, CACHE_MODE=REDIS 时使用)
+#   napcat   : 可选 QQ OneBot 客户端, 通过 `--profile onebot` 启用
+#
+# 启动:
+#   docker compose up -d                          # bot + db + redis
+#   docker compose --profile onebot up -d         # 含 NapCat QQ 客户端
+#
+# 配置: 复制 .env.example 为 .env 并按需修改
+# ============================================================================
+
+name: zhenxun-docker-framework
+
+services:
+  zhenxun:
+    build:
+      context: .
+      args:
+        ZHENXUN_REF: ${ZHENXUN_REF:-main}
+        PLUGINS_REF: ${PLUGINS_REF:-main}
+        RESOURCES_REF: ${RESOURCES_REF:-main}
+    image: ${ZHENXUN_IMAGE:-zhenxun/docker-framework:latest}
+    container_name: ${ZHENXUN_CONTAINER:-zhenxun}
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      ZHENXUN_UID: ${ZHENXUN_UID:-1000}
+      ZHENXUN_GID: ${ZHENXUN_GID:-1000}
+      # 机器人核心
+      SUPERUSERS: '${SUPERUSERS:-[""]}'
+      COMMAND_START: '${COMMAND_START:-[""]}'
+      NICKNAME: '${NICKNAME:-["真寻", "小真寻", "绪山真寻", "小寻子"]}'
+      PLATFORM_SUPERUSERS: '${PLATFORM_SUPERUSERS:-{}}'
+      ONEBOT_ACCESS_TOKEN: ${ONEBOT_ACCESS_TOKEN:-}
+      # 数据库
+      DB_URL: ${DB_URL:-}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: zhenxun
+      DB_PASSWORD: ${DB_PASSWORD:-zhenxun}
+      DB_NAME: zhenxun
+      DB_WAIT: "1"
+      DB_WAIT_TIMEOUT: "120"
+      # 缓存
+      CACHE_MODE: ${CACHE_MODE:-REDIS}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_EXPIRE: ${REDIS_EXPIRE:-600}
+      # 监听
+      HOST: 0.0.0.0
+      PORT: 8080
+      # WebUI
+      WEBUI_USERNAME: ${WEBUI_USERNAME:-admin}
+      WEBUI_PASSWORD: ${WEBUI_PASSWORD:-}
+      # 其它
+      SYSTEM_PROXY: ${SYSTEM_PROXY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+    ports:
+      - "${ZHENXUN_PORT:-8080}:8080"
+    volumes:
+      - zhenxun-data:/app/zhenxun/data
+      - zhenxun-resources:/app/zhenxun/resources
+      - zhenxun-log:/app/zhenxun/log
+      - zhenxun-plugins:/app/zhenxun/zhenxun/plugins
+      # 可选: 覆盖/补充 UI 主题等资源 (宿主机目录, 会与卷合并)
+      # - ./config/themes:/app/zhenxun/resources/themes
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket,sys; sys.exit(0 if socket.create_connection(('127.0.0.1',8080),5) else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  db:
+    image: postgres:15-alpine
+    container_name: ${DB_CONTAINER:-zhenxun-db}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zhenxun
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-zhenxun}
+      POSTGRES_DB: zhenxun
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zhenxun -d zhenxun"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # 仅调试需要时开放宿主机 5432
+    # ports:
+    #   - "${DB_PORT:-5432}:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${REDIS_CONTAINER:-zhenxun-redis}
+    restart: unless-stopped
+    command: >
+      sh -c 'if [ -n "$$REDIS_PASSWORD" ]; then
+        exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes;
+      else
+        exec redis-server --appendonly yes;
+      fi'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- 可选: NapCat QQ OneBot v11 客户端 ----
+  # 启用: docker compose --profile onebot up -d
+  # 登录: docker compose --profile onebot exec napcat 查看二维码 / 网页管理
+  napcat:
+    profiles: ["onebot"]
+    image: mlikiowa/napcat-docker:latest
+    container_name: ${NAPCAT_CONTAINER:-zhenxun-napcat}
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NAPCAT_UID: ${NAPCAT_UID:-1000}
+      NAPCAT_GID: ${NAPCAT_GID:-1000}
+      # 首次登录的 QQ 号; 留空则使用容器内交互/扫码
+      ACCOUNT: ${NAPCAT_ACCOUNT:-}
+      # NapCat WebUI 管理端口与密码
+      WEBUI_PORT: 6099
+      WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:-}
+    ports:
+      - "${NAPCAT_WEBUI_PORT:-6099}:6099"
+    volumes:
+      - napcat-config:/app/napcat/config
+      - napcat-qq:/app/.config/QQ
+      - napcat-plugins:/app/napcat/plugins
+      - napcat-logs:/app/napcat/logs
+    depends_on:
+      - zhenxun
+    # 将 NapCat 默认 OneBot 配置指向 zhenxun (见 config/napcat/onebot11.json.example)
+    # 首次启动后手动复制配置到 napcat-config 卷, 或使用 WebUI 添加反向 WS:
+    #   地址: ws://zhenxun:8080/onebot/v11/ws   令牌: ${ONEBOT_ACCESS_TOKEN}
+
+volumes:
+  zhenxun-data:
+  zhenxun-resources:
+  zhenxun-log:
+  zhenxun-plugins:
+  pgdata:
+  redisdata:
+  napcat-config:
+  napcat-qq:
+  napcat-plugins:
+  napcat-logs:

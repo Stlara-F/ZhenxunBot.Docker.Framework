@@ -1,0 +1,21 @@
+# 构建上下文排除项
+_ref/
+.github/
+config/
+docs/
+*.md
+.git/
+.gitignore
+.dockerignore
+.env
+.env.dev
+docker-compose*.yml
+Dockerfile
+LICENSE
+
+# sources/ 由 prepare 阶段单独处理 (排除重型/无关内容)
+sources/**/docs_image/
+sources/**/.git/
+sources/**/tests/
+sources/**/.venv/
+sources/**/__pycache__/

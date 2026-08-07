@@ -1,0 +1,24 @@
+# 参考仓库与临时源码（由 scripts/fetch-sources.sh 生成）
+/_ref/
+/sources/*
+!/sources/.gitkeep
+
+# 本地构建产物
+SnowLuma.Framework.tar.gz
+*.tar.gz
+!*.tar.gz.example
+
+# 环境与配置
+.env
+.env.dev
+*.local
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
