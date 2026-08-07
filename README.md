@@ -49,7 +49,7 @@ graph LR
 
 ```bash
 # 1. 克隆框架 (含 compose 与示例配置)
-git clone <本框架仓库地址>
+git clone https://github.com/Stlara-F/ZhenxunBot.Docker.Framework.git
 cd zhenxun.Docker.Framework
 
 # 2. 生成配置并编辑 (超级用户、WebUI 密码、数据库密码等)

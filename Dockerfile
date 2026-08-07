@@ -70,7 +70,7 @@ FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 LABEL org.opencontainers.image.title="Zhenxun Docker Framework" \
       org.opencontainers.image.description="绪山真寻 Bot (zhenxun-org) 的 Linux Docker 运行框架 / 后端 Bot 框架" \
-      org.opencontainers.image.source="https://github.com/zhenxun-org/zhenxun.Docker.Framework" \
+      org.opencontainers.image.source="https://github.com/Stlara-F/ZhenxunBot.Docker.Framework" \
       org.opencontainers.image.vendor="zhenxun-org" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
