@@ -154,7 +154,7 @@ jobs:
           fi
 
       - name: 预取上游源码
-        run: ./scripts/fetch-sources.sh
+        run: bash ./scripts/fetch-sources.sh
         env:
           ZHENXUN_REF: ${{ env.ZHENXUN_REF }}
           PLUGINS_REF: ${{ env.PLUGINS_REF }}
