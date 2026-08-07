@@ -88,7 +88,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ZHENXUN_HOME=/app/zhenxun \
     ZHENXUN_UID=1000 \
     ZHENXUN_GID=1000 \
-    PATH="/app/zhenxun/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+    PATH="/app/zhenxun/.venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # 基础运行库:
 #   - git / ca-certificates / curl : 插件商店、自动更新、健康检查
