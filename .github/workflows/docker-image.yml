@@ -162,7 +162,7 @@ jobs:
             HAS_GHCR="true"
             while IFS= read -r t; do
               [ -n "$t" ] && GHCR_TAGS="${GHCR_TAGS}\n${GHCR_IMAGE}:${t#*:}"
-            done < <(printf '%b' "$TAGS")
+            done < <(printf '%b\n' "$TAGS")
           fi
 
           # 合并并过滤空行, 写入 GITHUB_ENV
