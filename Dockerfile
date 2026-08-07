@@ -116,6 +116,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxcomposite1 \
       libxkbcommon0 \
       libxrandr2 \
+      passwd \
       procps \
       supervisor \
       tzdata \
