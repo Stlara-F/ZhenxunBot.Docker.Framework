@@ -11,7 +11,8 @@
 #   DOCKER_HUB_PASSWORD  Docker Hub Access Token / 密码
 # 可选 Variables (仓库 Settings -> Secrets and variables -> Actions -> Variables):
 #   IMAGE           Docker Hub 仓库 (默认 auto: 自动使用 DOCKER_HUB_USERNAME 命名空间)
-#   GHCR_IMAGE      额外推送到 GHCR 的仓库 (默认 auto: 自动使用仓库属主; 设为 none 则关闭)
+#   启用 GHCR 需在仓库 Settings -> Actions -> General 开启 Workflow permissions: Read and write
+#   GHCR_IMAGE      额外推送到 GHCR 的仓库 (默认 none 关闭; 设为 auto 自动使用仓库属主, 或直接写完整仓库)
 #   ZHENXUN_REF     zhenxun_bot 上游版本 (默认 main)
 #   PLUGINS_REF     插件库版本 (默认 main)
 #   RESOURCES_REF   主题资源版本 (默认 main)
@@ -55,7 +56,7 @@ on:
 
 env:
   IMAGE: ${{ vars.IMAGE || 'auto' }}
-  GHCR_IMAGE: ${{ vars.GHCR_IMAGE || 'auto' }}
+  GHCR_IMAGE: ${{ vars.GHCR_IMAGE || 'none' }}
   ZHENXUN_REF: ${{ inputs.zhenxun_ref || vars.ZHENXUN_REF || 'main' }}
   PLUGINS_REF: ${{ inputs.plugins_ref || vars.PLUGINS_REF || 'main' }}
   RESOURCES_REF: ${{ inputs.resources_ref || vars.RESOURCES_REF || 'main' }}
