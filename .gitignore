@@ -22,3 +22,6 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+
+# 本地日志缓存
+log_cache/

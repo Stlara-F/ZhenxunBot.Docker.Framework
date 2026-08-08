@@ -245,9 +245,16 @@ def fix_ownership() -> None:
         return
     uid = int(os.environ.get("ZHENXUN_UID", "1000"))
     gid = int(os.environ.get("ZHENXUN_GID", "1000"))
-    def _chown(path: Path, what: str) -> None:
+    def _chown_recursive(path: Path, what: str) -> None:
+        # 递归修正属主: 仅 chown 目录本身会导致子文件仍为 root,
+        # 非 root 运行的 zhenxun 进程无法写入 (如 data/configs/plugins2config.yaml)
         try:
-            shutil.chown(path, user=uid, group=gid)
+            for root_dir, dirs, files in os.walk(path):
+                for d in dirs:
+                    shutil.chown(os.path.join(root_dir, d), user=uid, group=gid)
+                for f in files:
+                    shutil.chown(os.path.join(root_dir, f), user=uid, group=gid)
+                shutil.chown(root_dir, user=uid, group=gid)
         except (OSError, AttributeError) as e:
             # 非 root 运行或平台不支持时仅警告, 不阻塞启动
             print(f"[bootstrap] 警告: 无法修正 {what} 属主: {e}", file=sys.stderr)
@@ -255,9 +262,12 @@ def fix_ownership() -> None:
     for sub in ("data", "log", "resources", "zhenxun/plugins"):
         path = PROJECT_ROOT / sub
         if path.exists():
-            _chown(path, sub)
+            _chown_recursive(path, sub)
     if ENV_DEV.exists():
-        _chown(ENV_DEV, ".env.dev")
+        try:
+            shutil.chown(ENV_DEV, user=uid, group=gid)
+        except (OSError, AttributeError) as e:
+            print(f"[bootstrap] 警告: 无法修正 .env.dev 属主: {e}", file=sys.stderr)
     print(f"[bootstrap] 已修正数据目录属主为 {uid}:{gid}")
 
 
