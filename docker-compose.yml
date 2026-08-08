@@ -8,8 +8,10 @@
 #   napcat   : 可选 QQ OneBot 客户端, 通过 `--profile onebot` 启用
 #
 # 启动:
-#   docker compose up -d                          # bot + db + redis
+#   docker compose up -d                          # 直接拉取已发布镜像: bot + db + redis
 #   docker compose --profile onebot up -d         # 含 NapCat QQ 客户端
+#   ZHENXUN_IMAGE=<代理前缀>/dockeruserstlara/zhenxun-docker-framework:latest docker compose up -d
+#                                                   # 国内拉取镜像加速 (如 docker.1ms.run/...)
 #
 # 配置: 复制 .env.example 为 .env 并按需修改
 # ============================================================================
@@ -18,13 +20,15 @@ name: zhenxun-docker-framework
 
 services:
   zhenxun:
-    build:
-      context: .
-      args:
-        ZHENXUN_REF: ${ZHENXUN_REF:-main}
-        PLUGINS_REF: ${PLUGINS_REF:-main}
-        RESOURCES_REF: ${RESOURCES_REF:-main}
-    image: ${ZHENXUN_IMAGE:-zhenxun/docker-framework:latest}
+    # 默认直接使用 Docker Hub 已发布镜像 (多架构 amd64+arm64)
+    # 需要本地构建时: 取消下方 build 段注释, 或改用 ./scripts/build-image.sh
+    # build:
+    #   context: .
+    #   args:
+    #     ZHENXUN_REF: ${ZHENXUN_REF:-main}
+    #     PLUGINS_REF: ${PLUGINS_REF:-main}
+    #     RESOURCES_REF: ${RESOURCES_REF:-main}
+    image: ${ZHENXUN_IMAGE:-dockeruserstlara/zhenxun-docker-framework:latest}
     container_name: ${ZHENXUN_CONTAINER:-zhenxun}
     restart: unless-stopped
     init: true
@@ -105,10 +109,12 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zhenxun -d zhenxun"]
+      # 首次初始化较慢(尤其低性能设备), start_period 内失败不计入重试
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      start_period: 30s
+      retries: 15
     # 仅调试需要时开放宿主机 5432
     # ports:
     #   - "${DB_PORT:-5432}:5432"
@@ -131,7 +137,8 @@ services:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      start_period: 10s
+      retries: 15
 
   # ---- 可选: NapCat QQ OneBot v11 客户端 ----
   # 启用: docker compose --profile onebot up -d

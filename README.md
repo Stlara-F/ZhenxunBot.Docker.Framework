@@ -65,10 +65,13 @@ docker compose logs -f zhenxun
 # WebUI: http://<服务器IP>:8080/
 ```
 
-### 方式二：docker compose 本地构建
+### 方式二：本地构建镜像
 
 ```bash
-docker compose up -d          # 首次自动预取源码并构建镜像 (需几分钟)
+./scripts/build-image.sh                        # 构建 (amd64, 源码由网络临时获取)
+# 或 PLATFORM=linux/arm64 ./scripts/build-image.sh
+# 构建后指定本地镜像启动:
+ZHENXUN_IMAGE=zhenxun-docker-framework:latest docker compose up -d
 ```
 
 ### 方式三：脚本一键启动
@@ -77,6 +80,25 @@ docker compose up -d          # 首次自动预取源码并构建镜像 (需几�
 ./scripts/run.sh              # 首次生成 .env 后编辑, 再执行一次
 PROFILE=onebot ./scripts/run.sh   # 额外启动 NapCat QQ 客户端
 ```
+
+## 🖥️ 国内拉取镜像（代理 / 加速器）
+
+Docker Hub 在国内访问不稳定时，可为镜像名加**代理前缀**（如 `docker.1ms.run`、`dockerproxy.net` 等，任选可用者）。`zhenxun`、`postgres`、`redis`、`napcat` 镜像均可用同样方式处理：
+
+```bash
+# 方式 A: 直接指定代理前缀拉取并启动 (推荐)
+ZHENXUN_IMAGE=docker.1ms.run/dockeruserstlara/zhenxun-docker-framework:latest \
+docker compose up -d
+
+# 方式 B: 手动拉取后打回原标签 (其它服务同理)
+docker pull docker.1ms.run/dockeruserstlara/zhenxun-docker-framework:latest
+docker tag  docker.1ms.run/dockeruserstlara/zhenxun-docker-framework:latest \
+            dockeruserstlara/zhenxun-docker-framework:latest
+docker compose up -d
+```
+
+> 当前已发布的可用标签为 `:dev`（`latest` 将在发布稳定版后可用，也可先改用 `:dev`）。
+> 若已配置 Docker 镜像加速器（`/etc/docker/daemon.json` 的 `registry-mirrors`），则无需代理前缀，直接 `docker compose up -d` 即可。
 
 ## 📄 标准 docker compose 示例
 
@@ -91,7 +113,7 @@ docker compose logs -f zhenxun     # 首次启动会打印 WebUI 临时密码
 services:
   # ---- 真寻 Bot 后端 (已发布镜像, 含官方插件 + UI 主题 + 渲染) ----
   zhenxun:
-    image: dockeruserstlara/zhenxun-docker-framework:latest
+    image: dockeruserstlara/zhenxun-docker-framework:latest   # 国内拉取失败可加代理前缀, 如 docker.1ms.run/...
     container_name: zhenxun
     restart: unless-stopped
     shm_size: 1gb          # Chromium 渲染需要较大的 /dev/shm
@@ -140,10 +162,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zhenxun -d zhenxun"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]   # 首次初始化较慢, start_period 内不计数
       interval: 10s
       timeout: 5s
-      retries: 10
+      start_period: 30s
+      retries: 15
 
   # ---- Redis 7 (缓存, CACHE_MODE=REDIS 时使用) ----
   redis:
@@ -349,6 +372,7 @@ docker compose down                     # 停止 (加 -v 删除数据卷)
 
 ## ❓ 常见问题
 
+- **`zhenxun-db is unhealthy` / 启动失败**：多为低性能设备上 PostgreSQL 首次初始化超时，或旧 `pgdata` 卷数据与密码不一致。升级到最新 compose（健康检查已加 `start_period` 与 `pg_isready -U postgres`）；仍失败可 `docker compose down -v` 清空卷后重试。
 - **WebUI 登录提示"配置为空"**：设置 `WEBUI_PASSWORD` 后重建容器，或编辑卷内 `data/configs/plugins2config.yaml` 的 `web-ui` 段。
 - **图片渲染失败 / Chromium 崩溃**：镜像已默认注入 `--no-sandbox --disable-dev-shm-usage` 且 compose 设置 `shm_size: 1gb`；如自建容器请保留这两项。
 - **首次启动较慢**：需要执行数据库迁移、初始化配置并预热 Playwright，属正常现象（`start_period: 60s`）。
