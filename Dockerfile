@@ -161,6 +161,21 @@ RUN uv run playwright install --with-deps chromium \
 # 官方插件 -> zhenxun/plugins (空卷首次挂载时会自动回填到卷内)
 COPY --from=prepare /sources/zhenxun_bot_plugins/plugins/ ./zhenxun/plugins/
 
+# 安装官方插件依赖: 聚合各插件 requirements.txt + 补充已知缺失依赖
+# (bym_ai: tomli; jmcomic_downloader: jmcomic/pyminizip/pikepdf)
+# 单个依赖失败仅警告, 不影响镜像构建与其他插件
+RUN set -eux; \
+    reqs="$(find zhenxun/plugins -mindepth 2 -maxdepth 2 -name requirements.txt 2>/dev/null | sort)"; \
+    if [ -n "${reqs}" ]; then \
+      args=""; for f in ${reqs}; do args="${args} -r ${f}"; done; \
+      echo "安装插件依赖: ${args}"; \
+      uv pip install --python /app/zhenxun/.venv/bin/python ${args} \
+        || echo "[warn] 部分插件依赖安装失败, 对应插件将不可用"; \
+    fi; \
+    uv pip install --python /app/zhenxun/.venv/bin/python \
+      tomli jmcomic pyminizip pikepdf \
+      || echo "[warn] 补充插件依赖安装失败"
+
 # UI 主题资源 -> resources/themes (zhenxun-bot-resources, 仓库根目录为 themes/)
 COPY --from=prepare /sources/zhenxun-bot-resources/themes/ ./resources/themes/
 
