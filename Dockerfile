@@ -191,6 +191,23 @@ COPY --from=prepare /sources/zhenxun-bot-resources/ ./resources/
 # check_webui_exists() 为真则跳过启动时的网络克隆, 保证离线可用
 COPY --from=prepare /sources/zhenxun_bot_webui_dist/ ./data/web_ui/public/
 
+# Patch 前端 API 地址为同源: 上游默认 http://localhost:8080, 远程部署时
+# 登录请求会发到访问者本机导致 CORS/连接失败; 改为 window.location.origin
+# 后按实际访问地址同源请求 (含 WebSocket), 端口由访问地址自动决定
+RUN python3 - <<'PY'
+import pathlib
+count = 0
+for js in pathlib.Path("data/web_ui/public/js").glob("*.js"):
+    s = js.read_text(encoding="utf-8")
+    if "http://localhost" in s:
+        s = s.replace('wi="http://localhost"', 'wi=window.location.origin')
+        s = s.replace('xi=()=>Ai()+":"+bi()', 'xi=()=>Ai()')
+        js.write_text(s, encoding="utf-8")
+        count += 1
+        print(f"patched webui: {js.name}")
+print(f"total patched files: {count}")
+PY
+
 # 框架文件: 进程管理 + 启动引导
 COPY supervisord.conf /etc/supervisord.conf
 COPY start.sh /usr/local/bin/start.sh
