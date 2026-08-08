@@ -1,24 +1,26 @@
 # ============================================================================
-# Zhenxun Docker Framework — CICD 自动构建并上传 Docker Hub (多架构)
+# Zhenxun Docker Framework — CICD: 监听上游 + 并行构建 + 自动推送 Docker Hub
 #
 # 触发方式:
-#   - push tag v*         : 发布镜像 (vX.Y.Z + latest[稳定版])
-#   - 每日定时 (02:00 UTC) : nightly 镜像 (nightly-latest / nightly-日期-sha)
-#   - 手动 workflow_dispatch : 自定义 tag / 上游版本
+#   - 每日定时 (02:00 UTC): 监听 zhenxun-org 上游 (zhenxun_bot / plugins /
+#     resources) main 分支 SHA, 与 .github/zhenxun-sync-*.json 记录对比,
+#     有变动才构建推送 (nightly-latest / nightly-日期-sha)
+#   - push tag v*          : 发布镜像 (vX.Y.Z + latest[稳定版])
+#   - 手动 workflow_dispatch: 自定义 tag / 上游版本, 始终构建
 #
-# 所需 Secrets (仓库 Settings -> Secrets and variables -> Actions):
-#   DOCKER_HUB_USERNAME  Docker Hub 用户名
-#   DOCKER_HUB_PASSWORD  Docker Hub Access Token / 密码
-# 可选 Variables (仓库 Settings -> Secrets and variables -> Actions -> Variables):
-#   IMAGE           Docker Hub 仓库 (默认 auto: 自动使用 DOCKER_HUB_USERNAME 命名空间)
-#   启用 GHCR 需在仓库 Settings -> Actions -> General 开启 Workflow permissions: Read and write
-#   GHCR_IMAGE      额外推送到 GHCR 的仓库 (默认 none 关闭; 设为 auto 自动使用仓库属主, 或直接写完整仓库)
-#   ZHENXUN_REF     zhenxun_bot 上游版本 (默认 main)
-#   PLUGINS_REF     插件库版本 (默认 main)
-#   RESOURCES_REF   主题资源版本 (默认 main)
+# 设计要点:
+#   - 并行构建: amd64/arm64 各自在原生 runner 上并行 buildx, push-by-digest,
+#     merge job 用 imagetools 合并 multi-arch manifest 并打标签
+#   - 一切由网络临时获取: CI 不预取/提交任何上游源码或产物, Dockerfile
+#     prepare 阶段在构建时从 GitHub 临时 clone
+#   - 仓库内仅保留小型状态文件 .github/zhenxun-sync-*.json (记录已构建的上游 SHA)
 #
-# 注意: 镜像名含 Docker Hub 用户名(secret), 因此标签计算放在 docker job 内
-#       通过 GITHUB_ENV 传递, 避免 job output 被 GitHub 以"含 secret"丢弃
+# Secrets:
+#   DOCKER_HUB_USERNAME / DOCKER_HUB_PASSWORD (必填)
+# Variables:
+#   IMAGE         Docker Hub 仓库 (默认 auto: 用 DOCKER_HUB_USERNAME 命名空间)
+#   GHCR_IMAGE    额外 GHCR 镜像 (默认 none; 需开启 Actions packages:write)
+#   ZHENXUN_REF / PLUGINS_REF / RESOURCES_REF (默认 main)
 # ============================================================================
 
 name: docker-publish
@@ -28,7 +30,7 @@ on:
     tags:
       - "v*"
   schedule:
-    # 每日 UTC 02:00 (= 北京时间 10:00) 构建 nightly
+    # 每日 UTC 02:00 (= 北京时间 10:00) 检查上游变动
     - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
@@ -37,7 +39,7 @@ on:
         required: false
         default: ""
       zhenxun_ref:
-        description: "zhenxun_bot 上游版本 (tag 或分支)"
+        description: "zhenxun_bot 上游版本 (tag/分支, 默认 main)"
         required: false
         default: ""
       plugins_ref:
@@ -48,6 +50,10 @@ on:
         description: "zhenxun-bot-resources 版本"
         required: false
         default: ""
+      platforms:
+        description: "目标平台, 逗号分隔 (默认 linux/amd64,linux/arm64)"
+        required: false
+        default: "linux/amd64,linux/arm64"
       also_latest:
         description: "同时更新 :latest"
         type: boolean
@@ -57,53 +63,181 @@ on:
 env:
   IMAGE: ${{ vars.IMAGE || 'auto' }}
   GHCR_IMAGE: ${{ vars.GHCR_IMAGE || 'none' }}
+  UPSTREAM_BOT: ${{ vars.ZHENXUN_BOT_REPO || 'zhenxun-org/zhenxun_bot' }}
+  UPSTREAM_PLUGINS: ${{ vars.ZHENXUN_PLUGINS_REPO || 'zhenxun-org/zhenxun_bot_plugins' }}
+  UPSTREAM_RESOURCES: ${{ vars.ZHENXUN_RESOURCES_REPO || 'zhenxun-org/zhenxun-bot-resources' }}
   ZHENXUN_REF: ${{ inputs.zhenxun_ref || vars.ZHENXUN_REF || 'main' }}
   PLUGINS_REF: ${{ inputs.plugins_ref || vars.PLUGINS_REF || 'main' }}
   RESOURCES_REF: ${{ inputs.resources_ref || vars.RESOURCES_REF || 'main' }}
 
 jobs:
-  # 仅判断 nightly 是否需要构建 (输出不含 secret)
-  meta:
+  # 1) 校验上游 / 对比同步状态 / 计算标签 (输出不含 secret)
+  check:
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.nightly-check.outputs.skip }}
+      has_update: ${{ steps.upstream.outputs.has_update }}
+      tags_suffix: ${{ steps.tags.outputs.tags_suffix }}
+      upstream_shas_json: ${{ steps.upstream.outputs.upstream_shas_json }}
+      lock_file: ${{ steps.upstream.outputs.lock_file }}
+      zhenxun_ref: ${{ steps.refs.outputs.zhenxun_ref }}
+      plugins_ref: ${{ steps.refs.outputs.plugins_ref }}
+      resources_ref: ${{ steps.refs.outputs.resources_ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Nightly 变更检查 (24h 内无提交则跳过)
-        id: nightly-check
-        if: github.event_name == 'schedule'
+      - name: 解析构建 refs (手动/发布用输入或变量, 定时用 main)
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          commits=$(git log --since="24 hours ago" --oneline)
-          if [ -z "$commits" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::框架仓库 24h 内无提交, 跳过 nightly 构建"
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BOT_REF="${{ env.ZHENXUN_REF }}"
+            PLUG_REF="${{ env.PLUGINS_REF }}"
+            RES_REF="${{ env.RESOURCES_REF }}"
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            BOT_REF="main"
+            PLUG_REF="main"
+            RES_REF="main"
+          fi
+          # 校验上游 ref 存在 (自动更新校验)
+          gh api "repos/${{ env.UPSTREAM_BOT }}/git/ref/heads/${BOT_REF}" --jq .ref >/dev/null \
+            || gh api "repos/${{ env.UPSTREAM_BOT }}/git/ref/tags/${BOT_REF}" --jq .ref >/dev/null \
+            || { echo "::error::上游 ${{ env.UPSTREAM_BOT }} 不存在 ref ${BOT_REF}"; exit 1; }
+          gh api "repos/${{ env.UPSTREAM_PLUGINS }}/git/ref/heads/${PLUG_REF}" --jq .ref >/dev/null \
+            || { echo "::error::上游 ${{ env.UPSTREAM_PLUGINS }} 不存在 ref ${PLUG_REF}"; exit 1; }
+          gh api "repos/${{ env.UPSTREAM_RESOURCES }}/git/ref/heads/${RES_REF}" --jq .ref >/dev/null \
+            || { echo "::error::上游 ${{ env.UPSTREAM_RESOURCES }} 不存在 ref ${RES_REF}"; exit 1; }
+          echo "zhenxun_ref=${BOT_REF}" >> "$GITHUB_OUTPUT"
+          echo "plugins_ref=${PLUG_REF}" >> "$GITHUB_OUTPUT"
+          echo "resources_ref=${RES_REF}" >> "$GITHUB_OUTPUT"
+          echo "::notice::上游 refs: zhenxun_bot@${BOT_REF} plugins@${PLUG_REF} resources@${RES_REF}"
+
+      - name: 监听上游 SHA 变动 (定时触发; 手动/发布始终构建)
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_REF: ${{ steps.refs.outputs.zhenxun_ref }}
+          PLUG_REF: ${{ steps.refs.outputs.plugins_ref }}
+          RES_REF: ${{ steps.refs.outputs.resources_ref }}
+        run: |
+          set -euo pipefail
+          LOCK_SUFFIX="$(printf '%s_%s_%s' "${{ env.UPSTREAM_BOT }}" "${{ env.UPSTREAM_PLUGINS }}" "${{ env.UPSTREAM_RESOURCES }}" | sha256sum | head -c 8)"
+          LOCK_FILE=".github/zhenxun-sync-${LOCK_SUFFIX}.json"
+
+          get_sha() {
+            local repo="$1" ref="$2"
+            gh api "repos/${repo}/commits/${ref}" --jq .sha
+          }
+          BOT_SHA="$(get_sha "${{ env.UPSTREAM_BOT }}" "${BOT_REF}")"
+          PLUG_SHA="$(get_sha "${{ env.UPSTREAM_PLUGINS }}" "${PLUG_REF}")"
+          RES_SHA="$(get_sha "${{ env.UPSTREAM_RESOURCES }}" "${RES_REF}")"
+          echo "上游 HEAD: bot=${BOT_SHA:0:12} plugins=${PLUG_SHA:0:12} resources=${RES_SHA:0:12}"
+          echo "upstream_shas_json={\"zhenxun_bot\":\"${BOT_SHA}\",\"zhenxun_bot_plugins\":\"${PLUG_SHA}\",\"zhenxun-bot-resources\":\"${RES_SHA}\"}" >> "$GITHUB_OUTPUT"
+          echo "lock_file=${LOCK_FILE}" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            LAST="{}"
+            if [ -f "${LOCK_FILE}" ]; then
+              LAST="$(cat "${LOCK_FILE}")"
+            fi
+            if [ "$(jq -r '.zhenxun_bot // "none"' <<<"${LAST}")" = "${BOT_SHA}" ] \
+               && [ "$(jq -r '.zhenxun_bot_plugins // "none"' <<<"${LAST}")" = "${PLUG_SHA}" ] \
+               && [ "$(jq -r '.["zhenxun-bot-resources"] // "none"' <<<"${LAST}")" = "${RES_SHA}" ]; then
+              echo "上游无变动, 跳过构建 (已同步 ${BOT_SHA:0:12})"
+              echo "has_update=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "检测到上游变动, 触发构建"
+              echo "has_update=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "非定时触发, 始终构建"
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
           fi
 
-  docker:
-    needs: meta
-    if: needs.meta.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: 校验 Docker Hub Secrets
+      - name: 计算标签后缀 (不含 secret, 可安全作为 job output)
+        id: tags
         run: |
-          if [ -z "${{ secrets.DOCKER_HUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_HUB_PASSWORD }}" ]; then
-            echo "::error::缺少 DOCKER_HUB_USERNAME / DOCKER_HUB_PASSWORD secrets, 无法推送到 Docker Hub"
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            push)
+              VERSION="${GITHUB_REF#refs/tags/}"
+              case "$VERSION" in
+                *beta*|*alpha*|*rc*|*pre*|*dev*) IS_PRERELEASE="true" ;;
+                *) IS_PRERELEASE="false" ;;
+              esac
+              SUFFIX="${VERSION}"
+              if [ "$IS_PRERELEASE" = "false" ] && [ "$VERSION" != "latest" ]; then
+                SUFFIX="${SUFFIX}\nlatest"
+              fi
+              ;;
+            schedule)
+              SHA="$(git rev-parse --short=12 HEAD)"
+              DATE="$(date +%Y%m%d)"
+              SUFFIX="nightly-latest\nnightly-${DATE}-${SHA}"
+              ;;
+            workflow_dispatch)
+              VERSION="${{ inputs.tag || 'dev' }}"
+              SUFFIX="${VERSION}"
+              if [ "${{ inputs.also_latest || 'false' }}" = "true" ] && [ "$VERSION" != "latest" ]; then
+                SUFFIX="${SUFFIX}\nlatest"
+              fi
+              ;;
+          esac
+          echo "tags_suffix<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%b\n' "${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "===== 标签后缀 ====="
+          printf '%b\n' "${SUFFIX}"
+
+  # 2) 解析平台矩阵 (amd64/arm64 原生 runner)
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Resolve platforms matrix
+        id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+        run: |
+          set -eu
+          matrix='{"include":['
+          sep=''
+          case ",${PLATFORMS}," in
+            *",linux/amd64,"*)
+              matrix="${matrix}${sep}{\"arch\":\"amd64\",\"platform\":\"linux/amd64\",\"os\":\"ubuntu-22.04\"}"
+              sep=',' ;;
+          esac
+          case ",${PLATFORMS}," in
+            *",linux/arm64,"*)
+              matrix="${matrix}${sep}{\"arch\":\"arm64\",\"platform\":\"linux/arm64\",\"os\":\"ubuntu-22.04-arm\"}"
+              sep=',' ;;
+          esac
+          matrix="${matrix}]}"
+          if [ "${matrix}" = '{"include":[]}' ]; then
+            echo "未选择受支持的平台 (linux/amd64, linux/arm64)" >&2
             exit 1
           fi
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
-      - name: 解析镜像仓库 (IMAGE / GHCR_IMAGE, auto 自动推导)
-        id: resolve
+  # 3) 并行构建 (每个平台独立原生 runner)
+  build:
+    needs: [check, resolve]
+    if: needs.check.outputs.has_update == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: 解析 Docker Hub 镜像名 (auto 使用 DOCKER_HUB_USERNAME)
+        id: image
         env:
           DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
         run: |
@@ -112,79 +246,8 @@ jobs:
           if [ "$IMAGE" = "auto" ] || [ -z "$IMAGE" ]; then
             IMAGE="${DOCKER_HUB_USERNAME}/zhenxun-docker-framework"
           fi
-          GHCR_IMAGE="${{ env.GHCR_IMAGE }}"
-          if [ "$GHCR_IMAGE" = "auto" ] || [ -z "$GHCR_IMAGE" ]; then
-            OWNER="${{ github.repository_owner }}"
-            GHCR_IMAGE="ghcr.io/${OWNER,,}/zhenxun-docker-framework"
-          fi
-          echo "IMAGE_FINAL=${IMAGE}" >> "$GITHUB_ENV"
-          echo "GHCR_FINAL=${GHCR_IMAGE}" >> "$GITHUB_ENV"
-          echo "::notice::Docker Hub 镜像仓库: ${IMAGE}"
-          echo "::notice::GHCR 镜像仓库: ${GHCR_IMAGE}"
-
-      - name: 计算镜像标签 (GITHUB_ENV 传递)
-        id: tags
-        run: |
-          set -euo pipefail
-          IMAGE="${IMAGE_FINAL}"
-          GHCR_IMAGE="${GHCR_FINAL}"
-          TAGS=""
-          GHCR_TAGS=""
-          HAS_GHCR="false"
-
-          case "${{ github.event_name }}" in
-            push)
-              VERSION="${GITHUB_REF#refs/tags/}"
-              case "$VERSION" in
-                *beta*|*alpha*|*rc*|*pre*|*dev*) IS_PRERELEASE="true" ;;
-                *) IS_PRERELEASE="false" ;;
-              esac
-              TAGS="${IMAGE}:${VERSION}"
-              if [ "$IS_PRERELEASE" = "false" ] && [ "$VERSION" != "latest" ]; then
-                TAGS="${TAGS}\n${IMAGE}:latest"
-              fi
-              ;;
-            schedule)
-              SHA="$(git rev-parse --short=12 HEAD)"
-              DATE="$(date +%Y%m%d)"
-              TAGS="${IMAGE}:nightly-latest\n${IMAGE}:nightly-${DATE}-${SHA}"
-              ;;
-            workflow_dispatch)
-              VERSION="${{ inputs.tag || 'dev' }}"
-              TAGS="${IMAGE}:${VERSION}"
-              if [ "${{ inputs.also_latest || 'false' }}" = "true" ] && [ "$VERSION" != "latest" ]; then
-                TAGS="${TAGS}\n${IMAGE}:latest"
-              fi
-              ;;
-          esac
-
-          # GHCR 镜像 (同后缀), 设为 none 关闭
-          if [ -n "$GHCR_IMAGE" ] && [ "$GHCR_IMAGE" != "none" ]; then
-            HAS_GHCR="true"
-            while IFS= read -r t; do
-              [ -n "$t" ] && GHCR_TAGS="${GHCR_TAGS}\n${GHCR_IMAGE}:${t#*:}"
-            done < <(printf '%b\n' "$TAGS")
-          fi
-
-          # 合并并过滤空行, 写入 GITHUB_ENV
-          ALL_TAGS="$(printf '%b\n' "$TAGS" "$GHCR_TAGS" | sed '/^[[:space:]]*$/d')"
-          echo "TAGS<<EOF" >> "$GITHUB_ENV"
-          printf '%s\n' "$ALL_TAGS" >> "$GITHUB_ENV"
-          echo "EOF" >> "$GITHUB_ENV"
-          echo "HAS_GHCR=${HAS_GHCR}" >> "$GITHUB_ENV"
-
-          echo "===== 镜像标签 ====="
-          printf '%s\n' "$ALL_TAGS"
-
-      - name: 预取上游源码
-        run: bash ./scripts/fetch-sources.sh
-        env:
-          ZHENXUN_REF: ${{ env.ZHENXUN_REF }}
-          PLUGINS_REF: ${{ env.PLUGINS_REF }}
-          RESOURCES_REF: ${{ env.RESOURCES_REF }}
-
-      - name: Set up QEMU (多架构仿真)
-        uses: docker/setup-qemu-action@v4
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Docker Hub 镜像: ${IMAGE} (${{ matrix.platform }})"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -195,33 +258,138 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
-      - name: 登录 GHCR (镜像, 可选)
-        if: env.HAS_GHCR == 'true'
+      - name: 并行构建并 push-by-digest
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          PLATFORM: ${{ matrix.platform }}
+          ZHENXUN_REF: ${{ needs.check.outputs.zhenxun_ref }}
+          PLUGINS_REF: ${{ needs.check.outputs.plugins_ref }}
+          RESOURCES_REF: ${{ needs.check.outputs.resources_ref }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform "${PLATFORM}" \
+            --file ./Dockerfile \
+            --build-arg "ZHENXUN_REF=${ZHENXUN_REF}" \
+            --build-arg "PLUGINS_REF=${PLUGINS_REF}" \
+            --build-arg "RESOURCES_REF=${RESOURCES_REF}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --output "type=image,name=${IMAGE},push-by-digest=true,push=true" \
+            --metadata-file metadata.json \
+            .
+          digest="$(jq -r '."containerimage.digest"' metadata.json)"
+          [ -n "${digest}" ] && [ "${digest}" != "null" ] || { echo "无法解析 digest" >&2; cat metadata.json >&2; exit 1; }
+          mkdir -p digests
+          touch "digests/${digest#sha256:}"
+          echo "Pushed ${IMAGE}@${digest}"
+
+      - name: 上传 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # 4) 合并 multi-arch manifest + 打标签 + 更新同步状态
+  merge:
+    needs: [check, resolve, build]
+    if: needs.check.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 解析 Docker Hub 镜像名
+        id: image
+        env:
+          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.IMAGE }}"
+          if [ "$IMAGE" = "auto" ] || [ -z "$IMAGE" ]; then
+            IMAGE="${DOCKER_HUB_USERNAME}/zhenxun-docker-framework"
+          fi
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: 登录 GHCR (可选)
+        if: env.GHCR_IMAGE != 'none'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 构建并推送多架构镜像 (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@v7
+      - name: 下载 digests
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.TAGS }}
-          build-args: |
-            ZHENXUN_REF=${{ env.ZHENXUN_REF }}
-            PLUGINS_REF=${{ env.PLUGINS_REF }}
-            RESOURCES_REF=${{ env.RESOURCES_REF }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+          pattern: docker-digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: 合并 manifest 并打标签
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          GHCR_IMAGE: ${{ env.GHCR_IMAGE }}
+        run: |
+          set -euo pipefail
+          cd digests
+          shopt -s nullglob
+          files=(*)
+          [ "${#files[@]}" -gt 0 ] || { echo "没有可用 digest" >&2; exit 1; }
+          refs=()
+          for d in "${files[@]}"; do refs+=("${IMAGE}@sha256:${d}"); done
+
+          while IFS= read -r suffix; do
+            [ -n "${suffix}" ] || continue
+            echo "创建 manifest: ${IMAGE}:${suffix}"
+            docker buildx imagetools create --tag "${IMAGE}:${suffix}" "${refs[@]}"
+            if [ -n "$GHCR_IMAGE" ] && [ "$GHCR_IMAGE" != "none" ]; then
+              echo "创建 GHCR manifest: ${GHCR_IMAGE}:${suffix}"
+              docker buildx imagetools create --tag "${GHCR_IMAGE}:${suffix}" "${refs[@]}"
+            fi
+          done < <(printf '%s\n' "${{ needs.check.outputs.tags_suffix }}")
+
+      - name: 更新上游同步状态 (提交 lock 文件)
+        env:
+          LOCK_FILE: ${{ needs.check.outputs.lock_file }}
+          UPSTREAM_SHAS: ${{ needs.check.outputs.upstream_shas_json }}
+        run: |
+          set -euo pipefail
+          [ -n "${UPSTREAM_SHAS}" ] || { echo "无上游 SHA, 跳过 lock 更新"; exit 0; }
+          echo "${UPSTREAM_SHAS}" > "${LOCK_FILE}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${LOCK_FILE}"
+          if git diff --cached --quiet; then
+            echo "lock 无变化"
+            exit 0
+          fi
+          git commit -m "chore: sync upstream ${UPSTREAM_SHAS:0:40}"
+          if ! git push; then
+            echo "::warning::lock 文件推送失败 (镜像已发布; 下次定时将重新检测上游)"
+          fi
 
       - name: 发布摘要
         run: |
           echo "### 镜像已发布 🚀" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          printf '%s\n' "$TAGS" | sed 's/^/ - /' >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r s; do
+            [ -n "$s" ] && echo " - ${{ steps.image.outputs.image }}:${s}" >> "$GITHUB_STEP_SUMMARY"
+          done < <(printf '%s\n' "${{ needs.check.outputs.tags_suffix }}")
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "上游: zhenxun_bot@${{ env.ZHENXUN_REF }} | plugins@${{ env.PLUGINS_REF }} | resources@${{ env.RESOURCES_REF }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "上游: zhenxun_bot@${{ needs.check.outputs.zhenxun_ref }} | plugins@${{ needs.check.outputs.plugins_ref }} | resources@${{ needs.check.outputs.resources_ref }}" >> "$GITHUB_STEP_SUMMARY"

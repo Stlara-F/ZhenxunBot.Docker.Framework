@@ -78,19 +78,32 @@ docker compose up -d          # 首次自动预取源码并构建镜像 (需几�
 PROFILE=onebot ./scripts/run.sh   # 额外启动 NapCat QQ 客户端
 ```
 
-## 🔄 CICD 自动上传 Docker Hub
+## 🔄 CICD: 监听上游 + 并行构建 + 自动推送
 
-`.github/workflows/docker-image.yml` 实现镜像的自动构建与发布：
+`.github/workflows/docker-image.yml` 实现**监听上游变动 → 自动校验 → 并行构建 → 推送 Docker Hub** 的全自动流水线（结构参考 [snowluma-docker-framework](https://github.com/Stlara-F/snowluma-docker-framework)）：
 
-| 触发方式 | 行为 | 镜像标签 |
-| :--- | :--- | :--- |
-| 推送 `v*` tag | 发布版（含 `beta/alpha/rc` 预发布识别） | `{version}` + `latest`（仅稳定版） |
-| 每日 02:00 UTC 定时 | 跟踪上游 main 的 nightly | `nightly-latest`、`nightly-{日期}-{sha}` |
-| 手动 `workflow_dispatch` | 自定义 tag / 上游版本 | 输入 tag（默认 `dev`） |
+| 触发方式 | 行为 |
+| :--- | :--- |
+| 每日 02:00 UTC 定时 | 通过 GitHub API 获取 zhenxun_bot / zhenxun_bot_plugins / zhenxun-bot-resources 的 main 分支 SHA，与仓库内 `.github/zhenxun-sync-*.json` 记录对比；**有变动才构建推送**（`nightly-latest`、`nightly-日期-sha`），构建成功后将新 SHA 写回 lock 文件 |
+| 推送 `v*` tag | 发布镜像（`vX.Y.Z` + `latest`[稳定版]），不对比上游 |
+| 手动 `workflow_dispatch` | 自定义 tag / 上游版本，始终构建（可传 `platforms`、`also_latest`） |
 
-- **多架构**：`linux/amd64` + `linux/arm64`（QEMU + buildx 单次构建并推送 manifest）。
-- **主仓库**：Docker Hub；**镜像**：可选推送到 GHCR。
-- **构建缓存**：`type=gha`，重复构建快速。
+**流水线（4 个 job）**：
+
+```mermaid
+graph LR
+    T[定时/手动/tag] --> C[check: 校验上游 ref + 对比 SHA + 算标签]
+    C -->|has_update| R[resolve: 平台矩阵]
+    R --> B1[build amd64<br/>原生 runner]
+    R --> B2[build arm64<br/>原生 runner]
+    B1 -->|digest| M[merge: imagetools 合并 manifest + 打标签 + 更新 lock]
+    B2 -->|digest| M
+```
+
+- **并行构建**：`linux/amd64` 与 `linux/arm64` 分别在原生 runner（ubuntu-22.04 / ubuntu-22.04-arm）上并行 `docker buildx build`，`push-by-digest` 推送后由 `merge` job 用 `docker buildx imagetools create` 合并多架构 manifest 并打标签。
+- **一切由网络临时获取**：仓库内**不保存任何上游源码/产物**；构建时 Dockerfile 的 `prepare` 阶段从 GitHub 临时 clone `zhenxun_bot`、`zhenxun_bot_plugins`、`zhenxun-bot-resources`，构建完成即丢弃。仓库内仅保留小型状态文件 `.github/zhenxun-sync-*.json`（记录已构建的上游 SHA，用于下次对比）。
+- **构建缓存**：`type=gha`，重复构建秒级完成。
+- **主仓库**：Docker Hub（镜像名默认 `auto` = `DOCKER_HUB_USERNAME/zhenxun-docker-framework`）；GHCR 默认关闭。
 
 ### 配置 Secrets / Variables
 
@@ -99,10 +112,11 @@ PROFILE=onebot ./scripts/run.sh   # 额外启动 NapCat QQ 客户端
 | 类型 | 名称 | 说明 |
 | :--- | :--- | :--- |
 | Secret | `DOCKER_HUB_USERNAME` | Docker Hub 用户名（必填） |
-| Secret | `DOCKER_HUB_PASSWORD` | Docker Hub Access Token（必填，见 Docker Hub → Account Settings → Security） |
-| Variable | `IMAGE` | Docker Hub 仓库，默认 `zhenxun-org/zhenxun-docker-framework` |
-| Variable | `GHCR_IMAGE` | GHCR 镜像仓库，设为 `none` 关闭 GHCR 推送 |
-| Variable | `ZHENXUN_REF` / `PLUGINS_REF` / `RESOURCES_REF` | 上游版本，默认 `main` |
+| Secret | `DOCKER_HUB_PASSWORD` | Docker Hub Access Token（必填） |
+| Variable | `IMAGE` | Docker Hub 仓库，默认 `auto`（自动使用 `DOCKER_HUB_USERNAME`） |
+| Variable | `GHCR_IMAGE` | GHCR 镜像仓库，默认 `none`；启用需在 Actions 设置开启 `Workflow permissions: Read and write` |
+| Variable | `ZHENXUN_REF` / `PLUGINS_REF` / `RESOURCES_REF` | 上游默认版本，默认 `main` |
+| Variable | `ZHENXUN_BOT_REPO` / `ZHENXUN_PLUGINS_REPO` / `ZHENXUN_RESOURCES_REPO` | 上游仓库地址，默认 zhenxun-org 三仓库 |
 
 ## ⚙️ 环境变量
 
