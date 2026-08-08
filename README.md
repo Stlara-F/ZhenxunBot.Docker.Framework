@@ -57,7 +57,7 @@ cp .env.example .env
 vi .env
 
 # 3. 指定已发布镜像并启动 (无需本地构建)
-ZHENXUN_IMAGE=zhenxun-org/zhenxun-docker-framework:latest docker compose up -d
+ZHENXUN_IMAGE=dockeruserstlara/zhenxun-docker-framework:latest docker compose up -d
 
 # 4. 查看日志与 WebUI 临时密码
 docker compose logs -f zhenxun
@@ -77,6 +77,126 @@ docker compose up -d          # 首次自动预取源码并构建镜像 (需几�
 ./scripts/run.sh              # 首次生成 .env 后编辑, 再执行一次
 PROFILE=onebot ./scripts/run.sh   # 额外启动 NapCat QQ 客户端
 ```
+
+## 📄 标准 docker compose 示例
+
+将以下内容保存为 `docker-compose.yml`（或直接使用本仓库自带的版本），修改 `SUPERUSERS` 为你的 QQ 号、`WEBUI_PASSWORD` 为 WebUI 登录密码，然后启动：
+
+```bash
+docker compose up -d
+docker compose logs -f zhenxun     # 首次启动会打印 WebUI 临时密码
+```
+
+```yaml
+services:
+  # ---- 真寻 Bot 后端 (已发布镜像, 含官方插件 + UI 主题 + 渲染) ----
+  zhenxun:
+    image: dockeruserstlara/zhenxun-docker-framework:latest
+    container_name: zhenxun
+    restart: unless-stopped
+    shm_size: 1gb          # Chromium 渲染需要较大的 /dev/shm
+    environment:
+      TZ: Asia/Shanghai
+      # 机器人核心
+      SUPERUSERS: '["123456789"]'      # 超级用户 QQ 号 (JSON 数组)
+      COMMAND_START: '["/"]'           # 指令前缀
+      NICKNAME: '["真寻", "小真寻", "绪山真寻"]'
+      ONEBOT_ACCESS_TOKEN: ""          # 反向 WS 令牌, 需与协议端一致 (可留空)
+      # 数据库 (使用下方内置 postgres)
+      DB_URL: postgres://zhenxun:zhenxun@db:5432/zhenxun
+      # 缓存 (REDIS / MEMORY / NONE)
+      CACHE_MODE: REDIS
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      # 监听 (容器内固定 8080)
+      HOST: 0.0.0.0
+      PORT: 8080
+      # WebUI 登录 (未设密码时首次启动自动生成临时密码并打印到日志)
+      WEBUI_USERNAME: admin
+      WEBUI_PASSWORD: change_me
+    ports:
+      - "8080:8080"        # WebUI / OneBot 反向 WS 端点
+    volumes:
+      - zhenxun-data:/app/zhenxun/data
+      - zhenxun-resources:/app/zhenxun/resources
+      - zhenxun-log:/app/zhenxun/log
+      - zhenxun-plugins:/app/zhenxun/zhenxun/plugins
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---- PostgreSQL 15 (必选) ----
+  db:
+    image: postgres:15-alpine
+    container_name: zhenxun-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zhenxun
+      POSTGRES_PASSWORD: zhenxun        # 与上方 DB_URL 一致
+      POSTGRES_DB: zhenxun
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zhenxun -d zhenxun"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- Redis 7 (缓存, CACHE_MODE=REDIS 时使用) ----
+  redis:
+    image: redis:7-alpine
+    container_name: zhenxun-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- 可选: NapCat QQ 协议端 ----
+  # 使用外部协议端 (NapCat/Lagrange/LLOneBot) 时删除本服务;
+  # 使用内置 NapCat 时取消注释并填入 QQ 号:
+  # napcat:
+  #   image: mlikiowa/napcat-docker:latest
+  #   container_name: zhenxun-napcat
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: Asia/Shanghai
+  #     NAPCAT_UID: 1000
+  #     NAPCAT_GID: 1000
+  #     ACCOUNT: "123456789"            # 你的 QQ 号
+  #     WEBUI_PORT: 6099
+  #     WEBUI_TOKEN: ""
+  #   ports:
+  #     - "6099:6099"                   # NapCat WebUI
+  #   volumes:
+  #     - napcat-config:/app/napcat/config
+  #     - napcat-qq:/app/.config/QQ
+  #     - napcat-plugins:/app/napcat/plugins
+
+volumes:
+  zhenxun-data:
+  zhenxun-resources:
+  zhenxun-log:
+  zhenxun-plugins:
+  pgdata:
+  redisdata:
+  # napcat-config:
+  # napcat-qq:
+  # napcat-plugins:
+```
+
+启动后：
+
+- **WebUI**：`http://<服务器IP>:8080/`（默认账号 `admin`，密码为 `WEBUI_PASSWORD` 或首次启动日志中的临时密码）
+- **对接协议端**：将 NapCat / Lagrange / LLOneBot 的反向 WS 指向 `ws://<服务器IP>:8080/onebot/v11/ws`，令牌与 `ONEBOT_ACCESS_TOKEN` 一致
+- **更新镜像**：`docker compose pull && docker compose up -d`
 
 ## 🔄 CICD: 监听上游 + 并行构建 + 自动推送
 
