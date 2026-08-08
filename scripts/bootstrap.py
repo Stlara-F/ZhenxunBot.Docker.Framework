@@ -237,6 +237,39 @@ def wait_for_db() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3.5 word_clouds 分词器池 patch (异步化 + 降池, 降低启动阻塞与内存)
+# ---------------------------------------------------------------------------
+
+def patch_wordclouds_segmenter() -> None:
+    """幂等 patch: 分词器池 on_startup 同步初始化会联网下载 pkuseg 模型并
+    阻塞 uvicorn 启动 (日志可见 5 分钟阻塞); 改为后台异步初始化并把池大小
+    5 -> 2, 显著降低启动时间与内存占用"""
+    target = (
+        PROJECT_ROOT
+        / "zhenxun"
+        / "plugins"
+        / "word_clouds"
+        / "utils"
+        / "segmenter_pool.py"
+    )
+    if not target.exists():
+        print("[bootstrap] 未找到 word_clouds 分词器池, 跳过 patch")
+        return
+    s = target.read_text(encoding="utf-8")
+    orig = s
+    s = s.replace("POOL_SIZE = 5", "POOL_SIZE = 2")
+    s = s.replace(
+        "@driver.on_startup\nasync def _():\n    await segmenter_pool.initialize()",
+        "@driver.on_startup\nasync def _():\n    asyncio.create_task(segmenter_pool.initialize())",
+    )
+    if s != orig:
+        target.write_text(s, encoding="utf-8")
+        print("[bootstrap] 已 patch word_clouds 分词器池: 异步初始化 + 池大小 5->2")
+    else:
+        print("[bootstrap] word_clouds 分词器池已是目标状态")
+
+
+# ---------------------------------------------------------------------------
 # 4. 目录属主
 # ---------------------------------------------------------------------------
 
@@ -275,6 +308,7 @@ def main() -> None:
     write_env_dev()
     seed_webui_config()
     wait_for_db()
+    patch_wordclouds_segmenter()
     fix_ownership()
     print("[bootstrap] 引导完成")
 

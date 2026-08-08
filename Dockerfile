@@ -57,6 +57,19 @@ RUN set -eux; \
            /sources/zhenxun-bot-resources/.git \
            /sources/zhenxun_bot_webui_dist/.git
 
+# 下载 pkuseg web 分词模型 (word_clouds 词云用, 避免运行期联网下载阻塞启动)
+RUN python3 - <<'PY'
+import pathlib, urllib.request, zipfile
+url = "https://github.com/lancopku/pkuseg-python/releases/download/v0.0.16/web.zip"
+dest = pathlib.Path("/sources/pkuseg_web")
+dest.mkdir(parents=True, exist_ok=True)
+zip_path = "/tmp/pkuseg_web.zip"
+urllib.request.urlretrieve(url, zip_path)
+with zipfile.ZipFile(zip_path) as z:
+    z.extractall(dest)
+print("pkuseg model files:", sorted(x.name for x in dest.iterdir()))
+PY
+
 # 记录上游版本到镜像元数据
 RUN python - <<'PY'
 import pathlib, tomllib
@@ -207,6 +220,10 @@ for js in pathlib.Path("data/web_ui/public/js").glob("*.js"):
         print(f"patched webui: {js.name}")
 print(f"total patched files: {count}")
 PY
+
+# 预置 pkuseg 分词模型 (word_clouds 词云), 避免启动时联网下载
+COPY --from=prepare /sources/pkuseg_web/ /home/zhenxun/.pkuseg/web/
+RUN chown -R zhenxun:zhenxun /home/zhenxun/.pkuseg
 
 # 框架文件: 进程管理 + 启动引导
 COPY supervisord.conf /etc/supervisord.conf
