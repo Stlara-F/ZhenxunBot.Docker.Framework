@@ -275,6 +275,7 @@ jobs:
             --build-arg "RESOURCES_REF=${RESOURCES_REF}" \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
+            --provenance=false \
             --output "type=image,name=${IMAGE},push-by-digest=true,push=true" \
             --metadata-file metadata.json \
             .
