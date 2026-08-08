@@ -19,3 +19,4 @@ sources/**/.git/
 sources/**/tests/
 sources/**/.venv/
 sources/**/__pycache__/
+log_cache/

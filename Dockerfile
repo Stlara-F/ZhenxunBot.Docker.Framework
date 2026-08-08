@@ -30,6 +30,8 @@ ARG PLUGINS_REPO=zhenxun-org/zhenxun_bot_plugins
 ARG PLUGINS_REF=main
 ARG RESOURCES_REPO=zhenxun-org/zhenxun-bot-resources
 ARG RESOURCES_REF=main
+ARG WEBUI_REPO=zhenxun-org/zhenxun_bot_webui
+ARG WEBUI_DIST_REF=dist
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
@@ -47,9 +49,13 @@ RUN set -eux; \
     if [ ! -d /sources/zhenxun-bot-resources ]; then \
       git clone --depth 1 --branch "${RESOURCES_REF}" "https://github.com/${RESOURCES_REPO}.git" /sources/zhenxun-bot-resources; \
     fi; \
+    if [ ! -d /sources/zhenxun_bot_webui_dist ]; then \
+      git clone --depth 1 --branch "${WEBUI_DIST_REF}" "https://github.com/${WEBUI_REPO}.git" /sources/zhenxun_bot_webui_dist; \
+    fi; \
     rm -rf /sources/zhenxun_bot/.git \
            /sources/zhenxun_bot_plugins/.git \
-           /sources/zhenxun-bot-resources/.git
+           /sources/zhenxun-bot-resources/.git \
+           /sources/zhenxun_bot_webui_dist/.git
 
 # 记录上游版本到镜像元数据
 RUN python - <<'PY'
@@ -176,8 +182,14 @@ RUN set -eux; \
       tomli jmcomic pyminizip pikepdf \
       || echo "[warn] 补充插件依赖安装失败"
 
-# UI 主题资源 -> resources/themes (zhenxun-bot-resources, 仓库根目录为 themes/)
-COPY --from=prepare /sources/zhenxun-bot-resources/themes/ ./resources/themes/
+# 完整资源包 -> resources/ (font/image/record/themes/__version__)
+# 满足 resources.spec 版本要求(>=1.1.1)与 check_resources_exists(font 非空),
+# 启动时不再触发阿里云资源下载
+COPY --from=prepare /sources/zhenxun-bot-resources/ ./resources/
+
+# 预置 WebUI 前端资源 -> data/web_ui/public (zhenxun_bot_webui dist 分支)
+# check_webui_exists() 为真则跳过启动时的网络克隆, 保证离线可用
+COPY --from=prepare /sources/zhenxun_bot_webui_dist/ ./data/web_ui/public/
 
 # 框架文件: 进程管理 + 启动引导
 COPY supervisord.conf /etc/supervisord.conf
