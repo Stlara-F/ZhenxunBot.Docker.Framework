@@ -162,7 +162,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]   # 首次初始化较慢, start_period 内不计数
+      test: ["CMD-SHELL", "pg_isready -U zhenxun"]   # 角色由 POSTGRES_USER 创建, start_period 覆盖首启
       interval: 10s
       timeout: 5s
       start_period: 30s
@@ -372,7 +372,7 @@ docker compose down                     # 停止 (加 -v 删除数据卷)
 
 ## ❓ 常见问题
 
-- **`zhenxun-db is unhealthy` / 启动失败**：多为低性能设备上 PostgreSQL 首次初始化超时，或旧 `pgdata` 卷数据与密码不一致。升级到最新 compose（健康检查已加 `start_period` 与 `pg_isready -U postgres`）；仍失败可 `docker compose down -v` 清空卷后重试。
+- **`zhenxun-db is unhealthy` / 启动失败**：多为低性能设备上 PostgreSQL 首次初始化超时，或旧 `pgdata` 卷数据与密码不一致。升级到最新 compose（健康检查已加 `start_period` 与 `pg_isready -U zhenxun`）；仍失败可 `docker compose down -v` 清空卷后重试。
 - **WebUI 登录提示"配置为空"**：设置 `WEBUI_PASSWORD` 后重建容器，或编辑卷内 `data/configs/plugins2config.yaml` 的 `web-ui` 段。
 - **图片渲染失败 / Chromium 崩溃**：镜像已默认注入 `--no-sandbox --disable-dev-shm-usage` 且 compose 设置 `shm_size: 1gb`；如自建容器请保留这两项。
 - **首次启动较慢**：需要执行数据库迁移、初始化配置并预热 Playwright，属正常现象（`start_period: 60s`）。

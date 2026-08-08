@@ -110,7 +110,7 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       # 首次初始化较慢(尤其低性能设备), start_period 内失败不计入重试
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U zhenxun"]   # 角色由 POSTGRES_USER 创建, start_period 覆盖首启
       interval: 10s
       timeout: 5s
       start_period: 30s

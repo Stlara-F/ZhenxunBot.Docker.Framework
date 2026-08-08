@@ -245,12 +245,19 @@ def fix_ownership() -> None:
         return
     uid = int(os.environ.get("ZHENXUN_UID", "1000"))
     gid = int(os.environ.get("ZHENXUN_GID", "1000"))
+    def _chown(path: Path, what: str) -> None:
+        try:
+            shutil.chown(path, user=uid, group=gid)
+        except (OSError, AttributeError) as e:
+            # 非 root 运行或平台不支持时仅警告, 不阻塞启动
+            print(f"[bootstrap] 警告: 无法修正 {what} 属主: {e}", file=sys.stderr)
+
     for sub in ("data", "log", "resources", "zhenxun/plugins"):
         path = PROJECT_ROOT / sub
         if path.exists():
-            shutil.chown(path, uid=uid, gid=gid)
+            _chown(path, sub)
     if ENV_DEV.exists():
-        shutil.chown(ENV_DEV, uid=uid, gid=gid)
+        _chown(ENV_DEV, ".env.dev")
     print(f"[bootstrap] 已修正数据目录属主为 {uid}:{gid}")
 
 
