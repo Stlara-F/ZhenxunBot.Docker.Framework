@@ -111,11 +111,12 @@ docker compose logs -f zhenxun     # 首次启动会打印 WebUI 临时密码
 
 ```yaml
 services:
-  # ---- 真寻 Bot 后端 (已发布镜像, 含官方插件 + UI 主题 + 渲染) ----
+  # ---- 真寻 Bot 后端 (已发布镜像, 含官方插件 + 完整资源 + WebUI 前端 + 渲染) ----
   zhenxun:
-    image: dockeruserstlara/zhenxun-docker-framework:latest   # 国内拉取失败可加代理前缀, 如 docker.1ms.run/...
+    image: docker.1ms.run/dockeruserstlara/zhenxun-docker-framework:dev   # 国内代理前缀, 可按需更换
     container_name: zhenxun
     restart: unless-stopped
+    init: true
     shm_size: 1gb          # Chromium 渲染需要较大的 /dev/shm
     environment:
       TZ: Asia/Shanghai
@@ -136,9 +137,9 @@ services:
       PORT: 8080
       # WebUI 登录 (未设密码时首次启动自动生成临时密码并打印到日志)
       WEBUI_USERNAME: admin
-      WEBUI_PASSWORD: change_me
+      WEBUI_PASSWORD: passwd
     ports:
-      - "8080:8080"        # WebUI / OneBot 反向 WS 端点
+      - "61999:8080"        # WebUI / OneBot 反向 WS 端点
     volumes:
       - zhenxun-data:/app/zhenxun/data
       - zhenxun-resources:/app/zhenxun/resources
@@ -152,7 +153,7 @@ services:
 
   # ---- PostgreSQL 15 (必选) ----
   db:
-    image: postgres:15-alpine
+    image: docker.1ms.run/postgres:15-alpine
     container_name: zhenxun-db
     restart: unless-stopped
     environment:
@@ -162,7 +163,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zhenxun"]   # 角色由 POSTGRES_USER 创建, start_period 覆盖首启
+      test: ["CMD-SHELL", "pg_isready -U zhenxun"]   # 角色由 POSTGRES_USER 创建, 勿用 postgres
       interval: 10s
       timeout: 5s
       start_period: 30s
@@ -170,7 +171,7 @@ services:
 
   # ---- Redis 7 (缓存, CACHE_MODE=REDIS 时使用) ----
   redis:
-    image: redis:7-alpine
+    image: docker.1ms.run/redis:7-alpine
     container_name: zhenxun-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
@@ -180,28 +181,8 @@ services:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 10s
       timeout: 5s
-      retries: 10
-
-  # ---- 可选: NapCat QQ 协议端 ----
-  # 使用外部协议端 (NapCat/Lagrange/LLOneBot) 时删除本服务;
-  # 使用内置 NapCat 时取消注释并填入 QQ 号:
-  # napcat:
-  #   image: mlikiowa/napcat-docker:latest
-  #   container_name: zhenxun-napcat
-  #   restart: unless-stopped
-  #   environment:
-  #     TZ: Asia/Shanghai
-  #     NAPCAT_UID: 1000
-  #     NAPCAT_GID: 1000
-  #     ACCOUNT: "123456789"            # 你的 QQ 号
-  #     WEBUI_PORT: 6099
-  #     WEBUI_TOKEN: ""
-  #   ports:
-  #     - "6099:6099"                   # NapCat WebUI
-  #   volumes:
-  #     - napcat-config:/app/napcat/config
-  #     - napcat-qq:/app/.config/QQ
-  #     - napcat-plugins:/app/napcat/plugins
+      start_period: 10s
+      retries: 15
 
 volumes:
   zhenxun-data:
@@ -210,15 +191,13 @@ volumes:
   zhenxun-plugins:
   pgdata:
   redisdata:
-  # napcat-config:
-  # napcat-qq:
-  # napcat-plugins:
+
 ```
 
 启动后：
 
-- **WebUI**：`http://<服务器IP>:8080/`（默认账号 `admin`，密码为 `WEBUI_PASSWORD` 或首次启动日志中的临时密码）
-- **对接协议端**：将 NapCat / Lagrange / LLOneBot 的反向 WS 指向 `ws://<服务器IP>:8080/onebot/v11/ws`，令牌与 `ONEBOT_ACCESS_TOKEN` 一致
+- **WebUI**：`http://<服务器IP>:61999/`（默认账号 `admin`，密码为 `WEBUI_PASSWORD` 或首次启动日志中的临时密码；示例将容器内 8080 映射到宿主机 61999，可按需修改 `ports`）
+- **对接协议端**：将 NapCat / Lagrange / LLOneBot 的反向 WS 指向 `ws://<服务器IP>:61999/onebot/v11/ws`，令牌与 `ONEBOT_ACCESS_TOKEN` 一致（若修改了端口映射请同步）
 - **更新镜像**：`docker compose pull && docker compose up -d`
 
 ## 🔄 CICD: 监听上游 + 并行构建 + 自动推送
